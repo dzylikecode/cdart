@@ -18,3 +18,21 @@ int main() {
   return 0;
 }
 ```
+
+## 从 C 迁移到 Dart
+
+### 后缀
+
+对于 C 语言中的后缀，比如 `f`、`L`，需要加上 `.`
+
+```dart
+// C: float f = 3.14f;
+float f = 3.14.f;
+```
+
+复数: `.c` 表示转化为复数，`.i` 表示乘以虚数单位 i
+
+```dart
+// C: complex double c = 1.0 + 3.0i;
+complex c = 1.0.c + 3.0.i;
+```
