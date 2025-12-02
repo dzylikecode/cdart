@@ -1,8 +1,4 @@
-/// Support for doing something awesome.
-///
-/// More dartdocs go here.
-library;
-
-export 'src/cdart_base.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'base.dart';
+export 'math.dart';
+export 'stdio.dart';
+export 'string.dart';
