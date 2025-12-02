@@ -7,3 +7,14 @@
 ```bash
 git clone https://git.musl-libc.org/git/musl
 ```
+
+## quick start
+
+```dart
+import 'package:cdart/stdio.dart';
+
+int main() {
+  printf("Hello, cdart!");
+  return 0;
+}
+```
