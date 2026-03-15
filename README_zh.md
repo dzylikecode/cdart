@@ -36,3 +36,16 @@ float f = 3.14.f;
 // C: complex double c = 1.0 + 3.0i;
 complex c = 1.0.c + 3.0.i;
 ```
+
+### 指针
+
+指针相当于是数组
+
+```dart
+// C: char *str = "Hello, World!";
+chars str = "Hello, World!";
+```
+
+### 移除
+
+- sizeof： 不需要
