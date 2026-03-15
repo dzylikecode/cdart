@@ -4,4 +4,4 @@ import 'src/stdio_impl.dart';
 
 final printf = stdout.write;
 
-bool ferror(FILE? file) => false;
+bool ferror(FILE? file) => file?.hasError ?? false;

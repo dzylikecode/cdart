@@ -1,17 +1,16 @@
 // dart format off
-import '../base.dart';
+import 'dart:math' as math;
+
 import '../stdarg.dart';
 import '../limits.dart';
-import '../stddef.dart';
 import '../ctype.dart';
 import '../stdio.dart';
 
 import 'stdio_impl.dart';
 
+// ─── Argument types ──────────────────────────────────────────────────────────
 
-sealed class Arg {
-  const Arg();
-}
+sealed class Arg { const Arg(); }
 
 final class ArgInt extends Arg {
   final int i;
@@ -19,7 +18,7 @@ final class ArgInt extends Arg {
 }
 
 final class ArgPtr extends Arg {
-  final chars p;
+  final String p;
   const ArgPtr(this.p);
 }
 
@@ -28,339 +27,644 @@ final class ArgDouble extends Arg {
   const ArgDouble(this.f);
 }
 
+// ─── Flag constants ───────────────────────────────────────────────────────────
 
 const ALT_FORM = '#';
 const ZERO_PAD = '0';
 const LEFT_ADJ = '-';
-const PAD_POS = ' ';
+const PAD_POS  = ' ';
 const MARK_POS = '+';
-const GROUPED = '\'';
-
+const GROUPED  = '\'';
 const FLAGMASK = {ALT_FORM, ZERO_PAD, LEFT_ADJ, PAD_POS, MARK_POS, GROUPED};
 
+// ─── ArgType state machine ───────────────────────────────────────────────────
+
 enum ArgType {
-	BARE, LPRE, LLPRE, HPRE, HHPRE, BIGLPRE,
-	ZTPRE, JPRE,
-	STOP,
-	PTR, INT, UINT, ULLONG,
-	LONG, ULONG,
-	SHORT, USHORT, CHAR, UCHAR,
-	LLONG, SIZET, IMAX, UMAX, PDIFF, UIPTR,
-	DBL, LDBL,
-	NOARG,
-	MAXSTATE;
+  BARE, LPRE, LLPRE, HPRE, HHPRE, BIGLPRE,
+  ZTPRE, JPRE,
+  STOP,
+  PTR, INT, UINT, ULLONG,
+  LONG, ULONG,
+  SHORT, USHORT, CHAR, UCHAR,
+  LLONG, SIZET, IMAX, UMAX, PDIFF, UIPTR,
+  DBL, LDBL,
+  NOARG,
+  MAXSTATE;
 
   bool get toBool => this != ArgType.BARE;
-
   bool operator <(ArgType other) => index < other.index;
-  bool operator <=(ArgType other) => index <= other.index;
 }
 
-String S(String x) => x;
-bool OOB(String x) => (x)-'A' > 'z'-'A';
+bool _oob(String c) =>
+    c.isEmpty ||
+    (c.codeUnitAt(0) - 'A'.codeUnitAt(0)) >
+        ('z'.codeUnitAt(0) - 'A'.codeUnitAt(0));
 
-
-final states = <ArgType, Map<String, ArgType>>{
-  .BARE: { /* 0: bare types */
-    S('d'): .INT, S('i'): .INT,
-    S('o'): .UINT, S('u'): .UINT, S('x'): .UINT, S('X'): .UINT,
-    S('e'): .DBL, S('f'): .DBL, S('g'): .DBL, S('a'): .DBL,
-    S('E'): .DBL, S('F'): .DBL, S('G'): .DBL, S('A'): .DBL,
-    S('c'): .INT, S('C'): .UINT,
-    S('s'): .PTR, S('S'): .PTR, S('p'): .UIPTR, S('n'): .PTR,
-    S('m'): .NOARG,
-    S('l'): .LPRE, S('h'): .HPRE, S('L'): .BIGLPRE,
-    S('z'): .ZTPRE, S('j'): .JPRE, S('t'): .ZTPRE,
-  }, .LPRE: { /* 1: l-prefixed */
-    S('d'): .LONG, S('i'): .LONG,
-    S('o'): .ULONG, S('u'): .ULONG, S('x'): .ULONG, S('X'): .ULONG,
-    S('e'): .DBL, S('f'): .DBL, S('g'): .DBL, S('a'): .DBL,
-    S('E'): .DBL, S('F'): .DBL, S('G'): .DBL, S('A'): .DBL,
-    S('c'): .UINT, S('s'): .PTR, S('n'): .PTR,
-    S('l'): .LLPRE,
-  }, .LLPRE: { /* 2: ll-prefixed */
-    S('d'): .LLONG, S('i'): .LLONG,
-    S('o'): .ULLONG, S('u'): .ULLONG,
-    S('x'): .ULLONG, S('X'): .ULLONG,
-    S('n'): .PTR,
-  }, .HPRE: { /* 3: h-prefixed */
-    S('d'): .SHORT, S('i'): .SHORT,
-    S('o'): .USHORT, S('u'): .USHORT,
-    S('x'): .USHORT, S('X'): .USHORT,
-    S('n'): .PTR,
-    S('h'): .HHPRE,
-  }, .HHPRE: { /* 4: hh-prefixed */
-    S('d'): .CHAR, S('i'): .CHAR,
-    S('o'): .UCHAR, S('u'): .UCHAR,
-    S('x'): .UCHAR, S('X'): .UCHAR,
-    S('n'): .PTR,
-  }, .BIGLPRE: { /* 5: L-prefixed */
-    S('e'): .LDBL, S('f'): .LDBL, S('g'): .LDBL, S('a'): .LDBL,
-    S('E'): .LDBL, S('F'): .LDBL, S('G'): .LDBL, S('A'): .LDBL,
-    S('n'): .PTR,
-  }, .ZTPRE: { /* 6: z- or t-prefixed (assumed to be same size) */
-    S('d'): .PDIFF, S('i'): .PDIFF,
-    S('o'): .SIZET, S('u'): .SIZET,
-    S('x'): .SIZET, S('X'): .SIZET,
-    S('n'): .PTR,
-  }, .JPRE: { /* 7: j-prefixed */
-    S('d'): .IMAX, S('i'): .IMAX,
-    S('o'): .UMAX, S('u'): .UMAX,
-    S('x'): .UMAX, S('X'): .UMAX,
-    S('n'): .PTR,
-  }
+const _states = <ArgType, Map<String, ArgType>>{
+  ArgType.BARE: {
+    'd': ArgType.INT,    'i': ArgType.INT,
+    'o': ArgType.UINT,   'u': ArgType.UINT,  'x': ArgType.UINT,  'X': ArgType.UINT,
+    'e': ArgType.DBL,    'f': ArgType.DBL,   'g': ArgType.DBL,   'a': ArgType.DBL,
+    'E': ArgType.DBL,    'F': ArgType.DBL,   'G': ArgType.DBL,   'A': ArgType.DBL,
+    'c': ArgType.INT,    'C': ArgType.UINT,
+    's': ArgType.PTR,    'S': ArgType.PTR,   'p': ArgType.UIPTR, 'n': ArgType.PTR,
+    'm': ArgType.NOARG,
+    'l': ArgType.LPRE,   'h': ArgType.HPRE,  'L': ArgType.BIGLPRE,
+    'z': ArgType.ZTPRE,  'j': ArgType.JPRE,  't': ArgType.ZTPRE,
+  },
+  ArgType.LPRE: {
+    'd': ArgType.LONG,   'i': ArgType.LONG,
+    'o': ArgType.ULONG,  'u': ArgType.ULONG, 'x': ArgType.ULONG, 'X': ArgType.ULONG,
+    'e': ArgType.DBL,    'f': ArgType.DBL,   'g': ArgType.DBL,   'a': ArgType.DBL,
+    'E': ArgType.DBL,    'F': ArgType.DBL,   'G': ArgType.DBL,   'A': ArgType.DBL,
+    'c': ArgType.UINT,   's': ArgType.PTR,   'n': ArgType.PTR,
+    'l': ArgType.LLPRE,
+  },
+  ArgType.LLPRE: {
+    'd': ArgType.LLONG,  'i': ArgType.LLONG,
+    'o': ArgType.ULLONG, 'u': ArgType.ULLONG,
+    'x': ArgType.ULLONG, 'X': ArgType.ULLONG,
+    'n': ArgType.PTR,
+  },
+  ArgType.HPRE: {
+    'd': ArgType.SHORT,  'i': ArgType.SHORT,
+    'o': ArgType.USHORT, 'u': ArgType.USHORT, 'x': ArgType.USHORT, 'X': ArgType.USHORT,
+    'n': ArgType.PTR,
+    'h': ArgType.HHPRE,
+  },
+  ArgType.HHPRE: {
+    'd': ArgType.CHAR,   'i': ArgType.CHAR,
+    'o': ArgType.UCHAR,  'u': ArgType.UCHAR,  'x': ArgType.UCHAR,  'X': ArgType.UCHAR,
+    'n': ArgType.PTR,
+  },
+  ArgType.BIGLPRE: {
+    'e': ArgType.LDBL,   'f': ArgType.LDBL,   'g': ArgType.LDBL,   'a': ArgType.LDBL,
+    'E': ArgType.LDBL,   'F': ArgType.LDBL,   'G': ArgType.LDBL,   'A': ArgType.LDBL,
+    'n': ArgType.PTR,
+  },
+  ArgType.ZTPRE: {
+    'd': ArgType.PDIFF,  'i': ArgType.PDIFF,
+    'o': ArgType.SIZET,  'u': ArgType.SIZET,
+    'x': ArgType.SIZET,  'X': ArgType.SIZET,
+    'n': ArgType.PTR,
+  },
+  ArgType.JPRE: {
+    'd': ArgType.IMAX,   'i': ArgType.IMAX,
+    'o': ArgType.UMAX,   'u': ArgType.UMAX,
+    'x': ArgType.UMAX,   'X': ArgType.UMAX,
+    'n': ArgType.PTR,
+  },
 };
 
+// ─── Low-level output helpers ─────────────────────────────────────────────────
 
-int vfprintf(FILE f, chars fmt, va_list ap) {
-  va_list ap2 = .new([]);
-  List<ArgType> nl_type = .filled(NL_ARGMAX + 1, .BARE);
-  List<Arg> nl_arg = List.filled(NL_ARGMAX + 1, const ArgInt(0));
-  chars internal_buf = '', saved_buf = '';
-  int olderr = 0;
-  int ret = 0;
+void _out(FILE f, String s) {
+  if (!f.hasError) f.write(s);
+}
 
-  va_copy(ap2, ap);
+/// Emit the standard padded-field sequence (mirrors musl's pad+out sequence).
+/// [prefix] is sign/0x/etc., [digits] is the formatted number body.
+/// [p] is the effective precision (>= digits.length after caller adjustment).
+int _emitInt(FILE f, String prefix, String digits, int w, int p, Set<String> fl) {
+  final pl      = prefix.length;
+  final dlen    = digits.length;
+  final precPad = p > dlen ? p - dlen : 0; // zeros to reach precision
+  final inner   = pl + precPad + dlen;     // total content width
 
-  if (printf_core(null, fmt, ap2, nl_arg, nl_type) < 0) {
-    return -1;
+  // Leading spaces (right-align, no zero-pad flag)
+  if (!fl.contains(LEFT_ADJ) && !fl.contains(ZERO_PAD) && inner < w) {
+    _out(f, ' ' * (w - inner));
+  }
+  _out(f, prefix);
+  // Leading zeros for width (zero-pad flag active)
+  if (fl.contains(ZERO_PAD) && !fl.contains(LEFT_ADJ) && inner < w) {
+    _out(f, '0' * (w - inner));
+  }
+  _out(f, '0' * precPad); // precision zeros
+  _out(f, digits);
+  // Trailing spaces (left-align)
+  if (fl.contains(LEFT_ADJ) && inner < w) {
+    _out(f, ' ' * (w - inner));
+  }
+  return math.max(w, inner);
+}
+
+// ─── Integer formatters ───────────────────────────────────────────────────────
+
+String _fmtX(int x, bool lower) {
+  if (x == 0) return '';
+  final digits = lower ? '0123456789abcdef' : '0123456789ABCDEF';
+  final buf = <String>[];
+  var n = x;
+  while (n != 0) { buf.add(digits[n & 0xf]); n = n >>> 4; }
+  return buf.reversed.join();
+}
+
+String _fmtO(int x) {
+  if (x == 0) return '';
+  final buf = <String>[];
+  var n = x;
+  while (n != 0) { buf.add(String.fromCharCode(0x30 + (n & 7))); n = n >>> 3; }
+  return buf.reversed.join();
+}
+
+String _fmtU(int x) {
+  if (x == 0) return '';
+  if (x > 0)  return x.toString();
+  return BigInt.from(x).toUnsigned(64).toString();
+}
+
+// ─── Float formatter ──────────────────────────────────────────────────────────
+
+String _hexFloat(double absY, int prec, bool upper) {
+  if (absY == 0.0) {
+    if (prec <= 0) return upper ? '0X0P+0' : '0x0p+0';
+    return '${upper ? '0X0.' : '0x0.'}${'0' * prec}${upper ? 'P+0' : 'p+0'}';
+  }
+  if (absY.isInfinite) return upper ? 'INF' : 'inf';
+  if (absY.isNaN)      return upper ? 'NAN' : 'nan';
+  var e = 0;
+  var m = absY;
+  while (m >= 2.0) { m /= 2.0; e++; }
+  while (m <  1.0) { m *= 2.0; e--; }
+  m -= 1.0; // fractional part of normalized mantissa
+  final hexDigs = upper ? '0123456789ABCDEF' : '0123456789abcdef';
+  final sb = StringBuffer(upper ? '0X1' : '0x1');
+  final expSign = e >= 0 ? '+' : '-';
+  final expStr  = '${upper ? 'P' : 'p'}$expSign${e.abs()}';
+
+  if (prec < 0) {
+    // Auto: emit only as many hex digits as needed (max 13 for double).
+    if (m != 0.0) {
+      sb.write('.');
+      var frac = m;
+      for (int i = 0; i < 13 && frac != 0.0; i++) {
+        frac *= 16;
+        final d = frac.toInt();
+        sb.write(hexDigs[d]);
+        frac -= d;
+      }
+    }
+  } else {
+    sb.write('.');
+    var frac = m;
+    for (int i = 0; i < prec; i++) {
+      frac *= 16;
+      final d = frac.toInt();
+      sb.write(hexDigs[d]);
+      frac -= d;
+    }
+  }
+  sb.write(expStr);
+  return sb.toString();
+}
+
+// Returns exponent for a double in scientific notation.
+int _getExp(double absY) {
+  if (absY == 0.0) return 0;
+  return int.parse(absY.toStringAsExponential().split('e')[1]);
+}
+
+String _sciStr(double absY, int p, bool upper) {
+  final raw = absY.toStringAsExponential(p);
+  final ei  = raw.indexOf('e');
+  final mant = raw.substring(0, ei);
+  final expPart = raw.substring(ei + 1);
+  final esign   = expPart[0];
+  var   enum2   = expPart.substring(1);
+  if (enum2.length < 2) enum2 = '0$enum2';
+  return '$mant${upper ? 'E' : 'e'}$esign$enum2';
+}
+
+int _fmtFp(FILE f, double y, int w, int p, Set<String> fl, String t) {
+  final bool isNeg = y < 0 || (y == 0.0 && y.isNegative);
+  final double absY = isNeg ? -y : y;
+
+  String signStr;
+  if (isNeg)                      signStr = '-';
+  else if (fl.contains(MARK_POS)) signStr = '+';
+  else if (fl.contains(PAD_POS))  signStr = ' ';
+  else                            signStr = '';
+  final pl = signStr.length;
+
+  if (!y.isFinite) {
+    final s = y.isNaN
+        ? (t == t.toUpperCase() ? 'NAN' : 'nan')
+        : (t == t.toUpperCase() ? 'INF' : 'inf');
+    final noZ = Set<String>.from(fl)..remove(ZERO_PAD);
+    final inner = pl + 3;
+    if (!noZ.contains(LEFT_ADJ) && inner < w) _out(f, ' ' * (w - inner));
+    _out(f, signStr); _out(f, s);
+    if (noZ.contains(LEFT_ADJ) && inner < w)  _out(f, ' ' * (w - inner));
+    return math.max(w, inner);
+  }
+
+  final tl = t.toLowerCase();
+  if (p < 0 && tl != 'a') p = 6; // %a uses auto precision (see _hexFloat)
+  String body;
+
+  if (tl == 'f') {
+    body = absY.toStringAsFixed(p);
+    if (fl.contains(ALT_FORM) && !body.contains('.')) body += '.';
+  } else if (tl == 'e') {
+    body = _sciStr(absY, p, t == 'E');
+    if (fl.contains(ALT_FORM)) {
+      final ei = body.indexOf(RegExp(r'[eE]'));
+      if (!body.substring(0, ei).contains('.'))
+        body = '${body.substring(0, ei)}.${body.substring(ei)}';
+    }
+  } else if (tl == 'g') {
+    if (p == 0) p = 1;
+    final exp = _getExp(absY);
+    if (exp < -4 || exp >= p) {
+      var s = _sciStr(absY, p - 1, t == 'G');
+      if (!fl.contains(ALT_FORM)) {
+        final ei   = s.indexOf(RegExp(r'[eE]'));
+        var   mant = s.substring(0, ei);
+        final ePart = s.substring(ei);
+        if (mant.contains('.')) {
+          mant = mant.replaceAll(RegExp(r'0+$'), '');
+          if (mant.endsWith('.')) mant = mant.substring(0, mant.length - 1);
+        }
+        s = mant + ePart;
+      }
+      body = s;
+    } else {
+      final fPrec = math.max(0, p - 1 - exp);
+      var s = absY.toStringAsFixed(fPrec);
+      if (!fl.contains(ALT_FORM)) {
+        if (s.contains('.')) {
+          s = s.replaceAll(RegExp(r'0+$'), '');
+          if (s.endsWith('.')) s = s.substring(0, s.length - 1);
+        }
+      } else if (!s.contains('.')) {
+        s += '.';
+      }
+      body = s;
+    }
+  } else { // a / A
+    body = _hexFloat(absY, p, t == 'A');
+  }
+
+  final inner = pl + body.length;
+  if (!fl.contains(LEFT_ADJ) && !fl.contains(ZERO_PAD) && inner < w) _out(f, ' ' * (w - inner));
+  _out(f, signStr);
+  if (fl.contains(ZERO_PAD) && !fl.contains(LEFT_ADJ) && inner < w)  _out(f, '0' * (w - inner));
+  _out(f, body);
+  if (fl.contains(LEFT_ADJ) && inner < w) _out(f, ' ' * (w - inner));
+  return math.max(w, inner);
+}
+
+// ─── pop_arg ──────────────────────────────────────────────────────────────────
+
+Arg _popArg(ArgType type, va_list ap) {
+  switch (type) {
+    case ArgType.PTR:
+      final val = ap.current;
+      ap.add(1);
+      if (val is String) return ArgPtr(val);
+      if (val is int)    return ArgInt(val); // null pointer (0)
+      return ArgPtr(val.toString());
+    case ArgType.DBL:
+    case ArgType.LDBL:
+      return ArgDouble(va_arg<double>(ap, double));
+    default:
+      return ArgInt(va_arg<int>(ap, int));
   }
 }
 
-int get overflow => -1;
-int get inval => -1;
+// ─── vfprintf ─────────────────────────────────────────────────────────────────
 
-int printf_core(FILE? f, chars fmt, va_list ap, List<Arg> nl_arg, List<ArgType> nl_type) {
-  chars_view a, z, s = chars_view(fmt);
-  unsigned l10n = 0;
-  Set<String> fl = {};
-  int w = 0, p; bool xp = false;
-  Arg arg;
-  int argpos;
-  ArgType st = .BARE, ps = .BARE;
-  int cnt = 0, l = 0;
-  size_t i;
-  chars buf;
-  chars prefix;
-  int t, pl;
-  wchar_t wc, ws;
-  chars mb;
-	for (;;) {
-		/* This error is only specified for snprintf, but since it's
-		 * unspecified for other forms, do the same. Stop immediately
-		 * on overflow; otherwise %n could produce wrong results. */
-		if (l > INT_MAX - cnt) return overflow;
+int vfprintf(FILE f, String fmt, va_list ap) {
+  final nl_type = List<ArgType>.filled(NL_ARGMAX + 1, ArgType.BARE);
+  final nl_arg  = List<Arg>.filled(NL_ARGMAX + 1, const ArgInt(0));
 
-		/* Update output count, end loop when fmt is exhausted */
-		cnt += l;
-		if (s.current == '') break;
+  // First pass: scan for positional argument types (f == null).
+  final ap2 = va_list(<Object>[], 0);
+  va_copy(ap2, ap);
+  if (printf_core(null, fmt, ap2, nl_arg, nl_type) < 0) return -1;
 
-		/* Handle literal text and %% format specifiers */
-    // 找到 %
-		for (a=s; s.current.isNotEmpty && s.current != '%'; s++);
-    // %% 会当作 %
-		for (z=s; s[0]=='%' && s[1]=='%'; z++, s+=2);
-		if (z-a > INT_MAX-cnt) return overflow;
-		l = z-a;
-		if (f.toBool) out(f!, a, l);
-		if (l.toBool) continue;
-
-    // %2$ 表示位置参数
-		if (isdigit(s[1]) && s[2]=='\$') {
-			l10n=1;
-			argpos = s[1]-'0';
-			s+=3;
-		} else {
-			argpos = -1;
-			s++;
-		}
-
-		/* Read modifier flags */
-		for (fl={}; FLAGMASK.contains(s.current); s++)
-			fl.add(s.current);
-
-		/* Read field width */
-		if (s.current=='*') {
-			if (isdigit(s[1]) && s[2]=='\$') {
-				l10n=1;
-				if (!f.toBool) {nl_type[s[1]-'0'] = .INT; w = 0;}
-				else w = (nl_arg[s[1]-'0'] as ArgInt).i;
-				s+=3;
-			} else if (!l10n.toBool) {
-				w = f.toBool ? va_arg(ap.current, int) : 0;
-				s++;
-			} else return inval;
-			if (w<0) {fl.add(LEFT_ADJ); w=-w;}
-		} else if (((w, s)=getint(s))case final ret when ret.$1 < 0) return overflow;
-
-		/* Read precision */
-		if (s.current=='.' && s[1]=='*') {
-			if (isdigit(s[2]) && s[3]=='\$') {
-				if (!f.toBool) {nl_type[s[2]-'0'] = .INT; p = 0;}
-				else p = (nl_arg[s[2]-'0'] as ArgInt).i;
-				s+=4;
-			} else if (!l10n.toBool) {
-				p = f.toBool ? va_arg(ap, int) : 0;
-				s+=2;
-			} else return inval;
-			xp = (p>=0);
-		} else if (s.current=='.') {
-			s++;
-			(p, s) = getint(s);
-			xp = true;
-		} else {
-			p = -1;
-			xp = false;
-		}
-
-		/* Format specifier state machine */
-		st=.BARE;
-		do {
-			if (OOB(s.current)) return inval;
-			ps=st;
-			st=states[st]![s.current] ?? .BARE;
-      s++;
-		} while (st < .STOP); // states 表里面没有 STOP, <= STOP 所以与之等价
-		if (!st.toBool) return inval;
-
-		/* Check validity of argument type (nl/normal) */
-		if (st==.NOARG) {
-			if (argpos>=0) return inval;
-		} else {
-			if (argpos>=0) {
-				if (!f.toBool) nl_type[argpos]=st;
-				else arg=nl_arg[argpos];
-			} else if (f.toBool) pop_arg(arg, st, ap);
-			else return 0;
-		}
-
-		if (!f.toBool) continue;
-
-		/* Do not process any new directives once in error state. */
-		if (ferror(f)) return -1;
-
-		z = buf + sizeof(buf);
-		prefix = "-+   0X0x";
-		pl = 0;
-		t = s[-1];
-
-		/* Transform ls,lc -> S,C */
-		if (ps.toBool && (t&15)==3) t&=~32;
-
-		/* - and 0 flags are mutually exclusive */
-		if (fl.contains(LEFT_ADJ)) fl.remove(ZERO_PAD);
-
-		switch(t) {
-		case 'n':
-			switch(ps) {
-			case .BARE: *(int *)arg.p = cnt; break;
-			case .LPRE: *(long *)arg.p = cnt; break;
-			case .LLPRE: *(long long *)arg.p = cnt; break;
-			case .HPRE: *(unsigned short *)arg.p = cnt; break;
-			case .HHPRE: *(unsigned char *)arg.p = cnt; break;
-			case .ZTPRE: *(size_t *)arg.p = cnt; break;
-			case .JPRE: *(uintmax_t *)arg.p = cnt; break;
-			}
-			continue;
-		case 'p':
-			p = MAX(p, 2*sizeof(void*));
-			t = 'x';
-			fl.add(ALT_FORM);
-		case 'x': case 'X':
-			a = fmt_x(arg.i, z, t&32);
-			if (arg.i && (fl.contains(ALT_FORM))) prefix+=(t>>4), pl=2;
-			goto ifmt_tail;
-		case 'o':
-			a = fmt_o(arg.i, z);
-			if ((fl.contains(ALT_FORM)) && p<z-a+1) p=z-a+1;
-			goto ifmt_tail;
-		case 'd': case 'i':
-			pl=1;
-			if (arg.i>INTMAX_MAX) {
-				arg.i=-arg.i;
-			} else if (fl.contains(MARK_POS)) {
-				prefix++;
-			} else if (fl.contains(PAD_POS)) {
-				prefix+=2;
-			} else pl=0;
-		case 'u':
-			a = fmt_u(arg.i, z);
-		ifmt_tail:
-			if (xp && p<0) goto overflow;
-			if (xp) fl.remove(ZERO_PAD);
-			if (!arg.i && !p) {
-				a=z;
-				break;
-			}
-			p = MAX(p, z-a + !arg.i);
-			break;
-		narrow_c:
-		case 'c':
-			*(a=z-(p=1))=arg.i;
-			fl.remove(ZERO_PAD);
-			break;
-		case 'm':
-			if (1) a = strerror(errno); else
-		case 's':
-			a = arg.p ? arg.p : "(null)";
-			z = a + strnlen(a, p<0 ? INT_MAX : p);
-			if (p<0 && *z) goto overflow;
-			p = z-a;
-			fl.remove(ZERO_PAD);
-			break;
-		case 'C':
-			if (!arg.i) goto narrow_c;
-			wc[0] = arg.i;
-			wc[1] = 0;
-			arg.p = wc;
-			p = -1;
-		case 'S':
-			ws = arg.p;
-			for (i=l=0; i<p && *ws && (l=wctomb(mb, *ws++))>=0 && l<=p-i; i+=l);
-			if (l<0) return -1;
-			if (i > INT_MAX) goto overflow;
-			p = i;
-			pad(f, ' ', w, p, fl);
-			ws = arg.p;
-			for (i=0; i<0U+p && *ws && i+(l=wctomb(mb, *ws++))<=p; i+=l)
-				out(f, mb, l);
-			pad(f, ' ', w, p, fl^LEFT_ADJ);
-			l = w>p ? w : p;
-			continue;
-		case 'e': case 'f': case 'g': case 'a':
-		case 'E': case 'F': case 'G': case 'A':
-			if (xp && p<0) return overflow;
-			l = fmt_fp(f, arg.f, w, p, fl, t, ps);
-			if (l<0) return overflow;
-			continue;
-		}
-
-		if (p < z-a) p = z-a;
-		if (p > INT_MAX-pl) return overflow;
-		if (w < pl+p) w = pl+p;
-		if (w > INT_MAX-cnt) return overflow;
-
-		pad(f, ' ', w, pl+p, fl);
-		out(f, prefix, pl);
-		pad(f, '0', w, pl+p, fl^ZERO_PAD);
-		pad(f, '0', p, z-a, 0);
-		out(f, a, z-a);
-		pad(f, ' ', w, pl+p, fl^LEFT_ADJ);
-
-		l = w;
-	}
-  return overflow;
+  // Second pass: actually format.
+  final ap3 = va_list(<Object>[], 0);
+  va_copy(ap3, ap);
+  return printf_core(f, fmt, ap3, nl_arg, nl_type);
 }
 
-void out(FILE f,  chars_view s, size_t l)
-{
-	if (!ferror(f)) __fwritex((void *)s, l, f);
+int printf_core(FILE? f, String fmt, va_list ap,
+    List<Arg> nl_arg, List<ArgType> nl_type) {
+  int pos   = 0;
+  int cnt   = 0;
+  int l     = 0;
+  bool l10n = false;
+
+  bool atEnd() => pos >= fmt.length;
+
+  for (;;) {
+    if (l > INT_MAX - cnt) return -1; // overflow
+    cnt += l;
+    l = 0;
+    if (atEnd()) break;
+
+    // ── 1. Literal text up to next '%' ──────────────────────────────────
+    final litStart = pos;
+    while (!atEnd() && fmt[pos] != '%') pos++;
+    // Collapse '%%' → one '%' in the output range [litStart, litEnd)
+    var litEnd = pos;
+    while (pos + 1 < fmt.length && fmt[pos] == '%' && fmt[pos + 1] == '%') {
+      litEnd++;
+      pos += 2;
+    }
+    l = litEnd - litStart;
+    if (f != null) _out(f, fmt.substring(litStart, litEnd));
+    if (l > 0) continue;
+    if (atEnd()) break;
+
+    // ── 2. Positional index %N$ ──────────────────────────────────────────
+    int argpos;
+    if (pos + 2 < fmt.length &&
+        isdigit(fmt[pos + 1]) &&
+        fmt[pos + 2] == '\$') {
+      l10n   = true;
+      argpos = fmt.codeUnitAt(pos + 1) - 0x30;
+      pos   += 3;
+    } else {
+      argpos = -1;
+      pos++;       // skip '%'
+    }
+
+    // ── 3. Flags ─────────────────────────────────────────────────────────
+    final fl = <String>{};
+    while (!atEnd() && FLAGMASK.contains(fmt[pos])) fl.add(fmt[pos++]);
+
+    // ── 4. Field width ───────────────────────────────────────────────────
+    int w = 0;
+    if (!atEnd() && fmt[pos] == '*') {
+      pos++;
+      if (!atEnd() &&
+          pos + 1 < fmt.length &&
+          isdigit(fmt[pos]) &&
+          fmt[pos + 1] == '\$') {
+        l10n = true;
+        final idx = fmt.codeUnitAt(pos) - 0x30;
+        if (f == null) { nl_type[idx] = ArgType.INT; w = 0; }
+        else w = (nl_arg[idx] as ArgInt).i;
+        pos += 2;
+      } else if (!l10n) {
+        w = (f != null) ? va_arg<int>(ap, int) : 0;
+      } else return -1;
+      if (w < 0) { fl.add(LEFT_ADJ); w = -w; }
+    } else {
+      final wStart = pos;
+      while (!atEnd() && isdigit(fmt[pos])) pos++;
+      if (pos > wStart) w = int.parse(fmt.substring(wStart, pos));
+    }
+
+    // ── 5. Precision ─────────────────────────────────────────────────────
+    int  p  = -1;
+    bool xp = false;
+    if (!atEnd() && fmt[pos] == '.') {
+      pos++;
+      if (!atEnd() && fmt[pos] == '*') {
+        pos++;
+        if (!atEnd() &&
+            pos + 1 < fmt.length &&
+            isdigit(fmt[pos]) &&
+            fmt[pos + 1] == '\$') {
+          final idx = fmt.codeUnitAt(pos) - 0x30;
+          if (f == null) { nl_type[idx] = ArgType.INT; p = 0; }
+          else p = (nl_arg[idx] as ArgInt).i;
+          pos += 2;
+        } else if (!l10n) {
+          p = (f != null) ? va_arg<int>(ap, int) : 0;
+        } else return -1;
+        xp = (p >= 0);
+      } else {
+        final pStart = pos;
+        while (!atEnd() && isdigit(fmt[pos])) pos++;
+        p  = (pos > pStart) ? int.parse(fmt.substring(pStart, pos)) : 0;
+        xp = true;
+      }
+    }
+
+    // ── 6. Length modifier + conversion specifier (state machine) ────────
+    var st = ArgType.BARE;
+    var ps = ArgType.BARE;
+    do {
+      if (atEnd()) return -1;
+      final c = fmt[pos];
+      if (_oob(c)) return -1;
+      ps = st;
+      st = _states[st]?[c] ?? ArgType.BARE;
+      pos++;
+    } while (st < ArgType.STOP);
+    if (!st.toBool) return -1;
+
+    // ── 7. Resolve argument ───────────────────────────────────────────────
+    Arg arg = const ArgInt(0);
+    if (st == ArgType.NOARG) {
+      if (argpos >= 0) return -1;
+    } else {
+      if (argpos >= 0) {
+        if (f == null) nl_type[argpos] = st;
+        else arg = nl_arg[argpos];
+      } else if (f != null) {
+        arg = _popArg(st, ap);
+      } else {
+        return 0;
+      }
+    }
+    if (f == null) continue; // scan-only pass
+
+    if (ferror(f)) return -1;
+
+    String t = fmt[pos - 1];
+
+    // Transform ls→S, lc→C
+    if (ps.toBool && (t.codeUnitAt(0) & 15) == 3) {
+      t = String.fromCharCode(t.codeUnitAt(0) & ~32);
+    }
+    if (fl.contains(LEFT_ADJ)) fl.remove(ZERO_PAD);
+
+    // ── 8. Format and emit ────────────────────────────────────────────────
+    final int argI = (arg is ArgInt) ? arg.i : 0;
+
+    switch (t) {
+
+      // ── %n ────────────────────────────────────────────────────────────────
+      case 'n':
+        // %n not supported (security risk); silently skip.
+        l = 0; continue;
+
+      // ── %p ────────────────────────────────────────────────────────────────
+      case 'p':
+        final effP = math.max(p < 0 ? 16 : p, 16);
+        final pfx  = (argI != 0) ? '0x' : '';
+        if (xp) fl.remove(ZERO_PAD);
+        final hex = argI == 0 ? '0' : _fmtX(argI, true);
+        l = _emitInt(f, pfx, hex, w, math.max(effP, hex.length), fl);
+        break;
+
+      // ── %x / %X ──────────────────────────────────────────────────────────
+      case 'x': case 'X':
+        final lower = t == 'x';
+        final pfx   = (argI != 0 && fl.contains(ALT_FORM))
+            ? (lower ? '0x' : '0X') : '';
+        if (xp && p < 0) return -1;
+        if (xp) fl.remove(ZERO_PAD);
+        if (argI == 0 && xp && p == 0) {
+          l = _emitInt(f, pfx, '', w, 0, fl);
+        } else {
+          final hex  = argI == 0 ? '0' : _fmtX(argI, lower);
+          final effP = math.max(p, hex.length);
+          l = _emitInt(f, pfx, hex, w, effP, fl);
+        }
+        break;
+
+      // ── %o ────────────────────────────────────────────────────────────────
+      case 'o':
+        if (xp && p < 0) return -1;
+        if (xp) fl.remove(ZERO_PAD);
+        if (argI == 0 && xp && p == 0) {
+          l = _emitInt(f, '', '', w, 0, fl);
+        } else {
+          final oct = argI == 0 ? '0' : _fmtO(argI);
+          var effP  = math.max(p, oct.length);
+          if (fl.contains(ALT_FORM) && effP < oct.length + 1) effP = oct.length + 1;
+          l = _emitInt(f, '', oct, w, effP, fl);
+        }
+        break;
+
+      // ── %d / %i ──────────────────────────────────────────────────────────
+      case 'd': case 'i':
+        String sign;
+        int absVal;
+        if (argI < 0) {
+          sign   = '-';
+          absVal = -argI;
+        } else if (fl.contains(MARK_POS)) {
+          sign = '+'; absVal = argI;
+        } else if (fl.contains(PAD_POS)) {
+          sign = ' '; absVal = argI;
+        } else {
+          sign = ''; absVal = argI;
+        }
+        if (xp && p < 0) return -1;
+        if (xp) fl.remove(ZERO_PAD);
+        if (argI == 0 && xp && p == 0) {
+          l = _emitInt(f, sign, '', w, 0, fl);
+        } else {
+          final dec  = absVal == 0 ? '0' : absVal.toString();
+          final effP = math.max(p, dec.length);
+          l = _emitInt(f, sign, dec, w, effP, fl);
+        }
+        break;
+
+      // ── %u ────────────────────────────────────────────────────────────────
+      case 'u':
+        if (xp && p < 0) return -1;
+        if (xp) fl.remove(ZERO_PAD);
+        if (argI == 0 && xp && p == 0) {
+          l = _emitInt(f, '', '', w, 0, fl);
+        } else {
+          final dec  = argI == 0 ? '0' : _fmtU(argI);
+          final effP = math.max(p, dec.length);
+          l = _emitInt(f, '', dec, w, effP, fl);
+        }
+        break;
+
+      // ── %c ────────────────────────────────────────────────────────────────
+      case 'c':
+        fl.remove(ZERO_PAD);
+        final ch = String.fromCharCode(argI & 0xFF);
+        l = _emitInt(f, '', ch, w, 1, fl);
+        break;
+
+      // ── %C (wide char) ────────────────────────────────────────────────────
+      case 'C':
+        fl.remove(ZERO_PAD);
+        if (argI == 0) {
+          l = _emitInt(f, '', '\x00', w, 1, fl);
+        } else {
+          final wch = String.fromCharCode(argI);
+          final inner = wch.length;
+          if (!fl.contains(LEFT_ADJ) && inner < w) _out(f, ' ' * (w - inner));
+          _out(f, wch);
+          if (fl.contains(LEFT_ADJ) && inner < w)  _out(f, ' ' * (w - inner));
+          l = math.max(w, inner);
+        }
+        break;
+
+      // ── %s ────────────────────────────────────────────────────────────────
+      case 's':
+        final str  = (arg is ArgPtr) ? arg.p
+            : (arg is ArgInt && argI == 0) ? '(null)'
+            : '(null)';
+        final slen = (p >= 0) ? math.min(str.length, p) : str.length;
+        fl.remove(ZERO_PAD);
+        if (!fl.contains(LEFT_ADJ) && slen < w) _out(f, ' ' * (w - slen));
+        _out(f, str.substring(0, slen));
+        if (fl.contains(LEFT_ADJ) && slen < w)  _out(f, ' ' * (w - slen));
+        l = math.max(w, slen);
+        break;
+
+      // ── %S (wide string – same as %s in Dart) ────────────────────────────
+      case 'S':
+        final str  = (arg is ArgPtr) ? arg.p : '';
+        final slen = (p >= 0) ? math.min(str.length, p) : str.length;
+        fl.remove(ZERO_PAD);
+        if (!fl.contains(LEFT_ADJ) && slen < w) _out(f, ' ' * (w - slen));
+        _out(f, str.substring(0, slen));
+        if (fl.contains(LEFT_ADJ) && slen < w)  _out(f, ' ' * (w - slen));
+        l = math.max(w, slen);
+        break;
+
+      // ── %m (strerror – simplified) ────────────────────────────────────────
+      case 'm':
+        const em = 'Unknown error';
+        fl.remove(ZERO_PAD);
+        if (!fl.contains(LEFT_ADJ) && em.length < w) _out(f, ' ' * (w - em.length));
+        _out(f, em);
+        if (fl.contains(LEFT_ADJ) && em.length < w)  _out(f, ' ' * (w - em.length));
+        l = math.max(w, em.length);
+        break;
+
+      // ── %e %f %g %a (and upper-case variants) ────────────────────────────
+      case 'e': case 'E':
+      case 'f': case 'F':
+      case 'g': case 'G':
+      case 'a': case 'A':
+        if (xp && p < 0) return -1;
+        final fval = (arg is ArgDouble) ? arg.f
+            : (arg is ArgInt) ? arg.i.toDouble()
+            : 0.0;
+        l = _fmtFp(f, fval, w, p, fl, t);
+        if (l < 0) return -1;
+        break;
+
+      default:
+        return -1;
+    }
+  }
+
+  if (f != null) return cnt;
+  if (!l10n)     return 0;
+
+  // Populate nl_arg with positional arguments (in index order).
+  int i;
+  for (i = 1; i <= NL_ARGMAX && nl_type[i] != ArgType.BARE; i++) {
+    nl_arg[i] = _popArg(nl_type[i], ap);
+  }
+  // Verify no gap exists after the last populated slot.
+  for (; i <= NL_ARGMAX && nl_type[i] == ArgType.BARE; i++);
+  if (i <= NL_ARGMAX) return -1;
+  return 1;
 }
 
-(int, chars_view) getint(chars_view s) {
-	int i;
-	for (i=0; isdigit(s.current); s++) {
-		 i = 10*i + (s.current-'0');
-	}
-	return (i, s);
+// ─── sprintf convenience wrapper ─────────────────────────────────────────────
+
+/// Format [fmt] with [args] and return the result string, or null on error.
+String? sprintf(String fmt, List<Object> args) {
+  final f  = FILE();
+  final ap = va_list(args, 0);
+  return vfprintf(f, fmt, ap) < 0 ? null : f.content;
 }
